@@ -1,0 +1,151 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+import statsmodels.formula.api as smf
+from scipy import stats
+import urllib.request
+import zipfile
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+pd.set_option('display.max_columns', 40)
+pd.set_option('display.float_format', '{:,.2f}'.format)
+sns.set_theme(style='whitegrid', palette='muted')
+print('Libraries loaded.')
+
+
+# Define paths for the uploaded datasets directly in /content/
+PUMS_PATH = '/content/psam_p24.csv'
+BLS_PATH  = '/content/all_data_M_2024.xlsx'
+
+print(f"  PUMS file '{PUMS_PATH}' ready.")
+print(f"  BLS file '{BLS_PATH}' ready.")
+
+print('\nAll datasets ready.')
+
+
+
+# Load datasets into DataFrames
+pums_raw = pd.read_csv(PUMS_PATH, low_memory=False)
+print(f'PUMS  — rows: {len(pums_raw):,}  | columns: {pums_raw.shape[1]}')
+
+# Read BLS file based on extension
+if BLS_PATH.lower().endswith('.xlsx'):
+    bls_raw = pd.read_excel(BLS_PATH, dtype={'OCC_CODE': str, 'AREA': str})
+else:
+    bls_raw = pd.read_csv(BLS_PATH, dtype={'OCC_CODE': str, 'AREA': str}, low_memory=False)
+print(f'BLS   — rows: {len(bls_raw):,}  | columns: {bls_raw.shape[1]}')
+
+
+
+# Filter to civilian employed workers (ESR == 1)
+pums = pums_raw[pums_raw['ESR'] == 1.0].copy()
+print(f'Employed workers in sample: {len(pums):,}')
+
+# Derived wage variables
+pums['annual_hours'] = pums['WKHP'] * pums['WKWN']
+pums['hourly_wage']  = np.where(pums['annual_hours'] > 0,
+                                 pums['WAGP'] / pums['annual_hours'], np.nan)
+pums['log_wage']     = np.log(pums['WAGP'].replace(0, np.nan))
+pums['full_time']    = (pums['WKHP'] >= 35).astype(int)
+pums['part_time']    = (pums['WKHP'] <  35).astype(int)
+
+# Education tier
+edu_map = {
+    **{i: 'Less than HS'    for i in range(1,  16)},
+    **{i: 'High School/GED' for i in range(16, 18)},
+    **{i: 'Some College'    for i in range(18, 21)},
+    **{i: "Bachelor's"      for i in range(21, 22)},
+    **{i: 'Graduate'        for i in range(22, 25)},
+}
+pums['edu_tier'] = pums['SCHL'].map(edu_map)
+edu_order = ["Less than HS", "High School/GED", "Some College", "Bachelor's", "Graduate"]
+
+# Race-ethnicity
+def race_eth(row):
+    if row['HISP'] > 1:  return 'Hispanic'
+    r = row['RAC1P']
+    if r == 1: return 'White NH'
+    if r == 2: return 'Black NH'
+    if r == 6: return 'Asian NH'
+    if r == 9: return 'Multiracial/Other'
+    return 'Other'
+pums['race_eth']    = pums.apply(race_eth, axis=1)
+
+# Other labels
+pums['sex_label']   = pums['SEX'].map({1: 'Male', 2: 'Female'})
+pums['stem']        = (pums['SCIENGP'] == 1.0).astype(int)
+pums['nativity']    = pums['NATIVITY'].map({1: 'Native-born', 2: 'Foreign-born'})
+pums['disabled']    = (pums['DIS'] == 1).astype(int)
+pums['soc2']        = pums['SOCP'].astype(str).str[:2]
+pums['cow_label']   = pums['COW'].map({
+    1: 'Private for-profit', 2: 'Private nonprofit',
+    3: 'Local govt',         4: 'State govt',
+    5: 'Federal govt',       6: 'Self-emp (inc)',
+    7: 'Self-emp (uninc)',   8: 'Unpaid'
+})
+pums['commute_mode'] = pums['JWTRNS'].map({
+    1:'Car alone', 2:'Carpool', 3:'Bus/Trolley', 4:'Streetcar',
+    5:'Subway/Rail', 6:'Railroad', 7:'Ferry', 8:'Taxi/Rideshare',
+    9:'Motorcycle', 10:'Bicycle', 11:'Walk', 12:'Other', 13:'WFH'
+})
+
+print('PUMS feature engineering complete.')
+pums.to_csv('/content/pums_processed.csv', index=False)
+print('Saved pums_processed.csv')
+
+
+
+
+# BLS: filter to Maryland state-level rows only (AREA_TYPE == 2 = state)
+# Without this filter, metro sub-areas are included and every PUMS worker
+# gets duplicate rows on merge, inflating all weighted statistics.
+bls_md = bls_raw[
+    (bls_raw['AREA_TYPE'] == 2) &
+    (bls_raw['PRIM_STATE'] == 'MD') &
+    (bls_raw['O_GROUP'].isin(['major', 'detailed']))
+].copy()
+
+for col in ['A_MEDIAN', 'A_MEAN', 'H_MEDIAN', 'TOT_EMP', 'LOC_QUOTIENT']:
+    bls_md[col] = pd.to_numeric(
+        bls_md[col].astype(str).str.replace(',', ''), errors='coerce'
+    )
+
+bls_md['soc2'] = bls_md['OCC_CODE'].str[:2]
+print(f'BLS Maryland rows: {len(bls_md):,}')
+print(bls_md[['OCC_CODE','OCC_TITLE','TOT_EMP','A_MEDIAN']].head(5))
+bls_md.to_csv('/content/bls_md_processed.csv', index=False)
+print('Saved bls_md_processed.csv')
+
+
+
+
+# Attach BLS market median wage to each PUMS worker via 2-digit SOC
+bls_major = (
+    bls_md[bls_md['O_GROUP'] == 'major']
+    [['soc2', 'OCC_TITLE', 'A_MEDIAN', 'LOC_QUOTIENT']]
+    .drop_duplicates(subset='soc2')   # guard against residual duplicates (e.g. multiple NAICS rows)
+    .rename(columns={'A_MEDIAN': 'market_median', 'LOC_QUOTIENT': 'loc_quotient'})
+)
+
+pums2 = pums.merge(bls_major, on='soc2', how='left')
+pums2['wage_vs_market'] = pums2['WAGP'] / pums2['market_median']
+
+print(f'Workers with market median attached: {pums2["market_median"].notna().sum():,}')
+pums2.to_csv('/content/pums_merged_bls.csv', index=False)
+print('Saved pums_merged_bls.csv')
+
+
+
+
+def wtd_median(group, weight_col='PWGTP', val_col='WAGP'):
+    data = group[[val_col, weight_col]].dropna().sort_values(val_col)
+    if data.empty:
+        return np.nan
+    cumw = data[weight_col].cumsum() / data[weight_col].sum()
+    return data.loc[cumw >= 0.5, val_col].iloc[0]
