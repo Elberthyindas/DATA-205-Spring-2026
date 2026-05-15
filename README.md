@@ -1,7 +1,7 @@
 # DATA-205-Spring-2026
 
 # Maryland Labor Market Inequality  
-**Elberth Ndounou Yindas  
+Elberth Ndounou Yindas  
 DATA 205  
 Capstone Project
 
