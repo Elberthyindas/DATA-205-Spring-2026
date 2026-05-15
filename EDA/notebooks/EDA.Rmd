@@ -512,7 +512,7 @@ fig11 = px.scatter(
 )
 fig11.show()
 
-
+# I used the help of Gemini and clockcode to help me clean my visualization and make them work the best way.
 
 
 
