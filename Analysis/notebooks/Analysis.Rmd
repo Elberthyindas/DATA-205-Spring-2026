@@ -109,3 +109,5 @@ print('\nCONCLUSION: Maryland wage inequality is both structural (occupational s
 print('and residual (within-job gaps by race, gender, nativity, and disability persist).')
 
 --------------
+
+# Gemini and Clockcode were really usefull to polish my analysis
