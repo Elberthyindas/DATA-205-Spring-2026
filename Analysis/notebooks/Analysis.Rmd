@@ -1,1 +1,111 @@
+## 3. Q2 — Gender Wage Gap by Occupation
 
+# Conditional gender gap: log(wage) ~ sex + education + age + full_time + occupation FE
+reg_df = pums2[['log_wage','sex_label','edu_tier','AGEP','full_time','soc2','PWGTP']].dropna()
+reg_df.to_csv('/content/reg_df.csv', index=False)
+print('Saved reg_df.csv')
+
+model_gender = smf.wls(
+    'log_wage ~ C(sex_label, Treatment("Male")) + C(edu_tier) + AGEP + full_time + C(soc2)',
+    data=reg_df, weights=reg_df['PWGTP']
+).fit(cov_type='HC3')
+
+c = model_gender.params['C(sex_label, Treatment("Male"))[T.Female]']
+p = model_gender.pvalues['C(sex_label, Treatment("Male"))[T.Female]']
+print(f'Conditional gender wage gap: {c:.4f}  →  {(np.exp(c)-1)*100:.1f}% lower for women  (p={p:.4f})')
+print(f'R²: {model_gender.rsquared:.4f}')
+
+------------
+
+
+## 11. Full Regression Model — All Wage Determinants
+
+full_df = pums2[
+    ['log_wage','sex_label','race_eth','edu_tier','AGEP','full_time',
+     'stem','cow_label','nativity','disabled','soc2','PWGTP']
+].dropna()
+full_df.to_csv('/content/full_df.csv', index=False)
+print('Saved full_df.csv')
+
+model_full = smf.wls(
+    '''log_wage ~ C(sex_label, Treatment("Male"))
+               + C(race_eth, Treatment("White NH"))
+               + C(edu_tier, Treatment("High School/GED"))
+               + AGEP + full_time + stem
+               + C(cow_label, Treatment("Private for-profit"))
+               + C(nativity, Treatment("Native-born"))
+               + disabled
+               + C(soc2)''',
+    data=full_df, weights=full_df['PWGTP']
+).fit(cov_type='HC3')
+
+# Forest plot of key coefficients (exclude occupation FEs)
+key_vars = [c for c in model_full.params.index if not c.startswith('C(soc2)') and c != 'Intercept']
+coef_df = pd.DataFrame({
+    'variable': key_vars,
+    'coef':     model_full.params[key_vars],
+    'ci_lo':    model_full.conf_int().loc[key_vars, 0],
+    'ci_hi':    model_full.conf_int().loc[key_vars, 1],
+    'pval':     model_full.pvalues[key_vars]
+}).reset_index(drop=True).sort_values('coef')
+
+colors = ['#1565C0' if p < 0.05 and c > 0 else
+          '#B71C1C' if p < 0.05 and c < 0 else '#9E9E9E'
+          for c, p in zip(coef_df['coef'], coef_df['pval'])]
+
+fig, ax = plt.subplots(figsize=(10, 10))
+ax.barh(
+    coef_df['variable'], coef_df['coef'],
+    xerr=[coef_df['coef'] - coef_df['ci_lo'], coef_df['ci_hi'] - coef_df['coef']],
+    color=colors, alpha=0.85
+)
+ax.axvline(0, color='black', linewidth=0.8, linestyle='--')
+ax.set_xlabel('Coefficient (effect on log annual wage)')
+ax.set_title(
+    'Wage Determinants — Full Model Coefficients\n'
+    '(blue = positive & significant, red = negative & significant, gray = not significant)',
+    fontsize=12
+)
+plt.tight_layout()
+plt.show()
+
+print(f'R²: {model_full.rsquared:.4f}  |  Adj R²: {model_full.rsquared_adj:.4f}')
+
+
+----------
+
+## 12. Final Answer — Summary Table 
+
+pairs = [
+    ('C(sex_label, Treatment("Male"))[T.Female]',                         'Female vs. Male'),
+    ('C(race_eth, Treatment("White NH"))[T.Black NH]',                    'Black vs. White NH'),
+    ('C(race_eth, Treatment("White NH"))[T.Hispanic]',                    'Hispanic vs. White NH'),
+    ('C(race_eth, Treatment("White NH"))[T.Asian NH]',                    'Asian vs. White NH'),
+    ("C(edu_tier, Treatment('High School/GED'))[T.Bachelor's]",           "Bachelor's vs. HS/GED"),
+    ("C(edu_tier, Treatment('High School/GED'))[T.Graduate]",             'Graduate vs. HS/GED'),
+    ('stem',                                                              'STEM Degree Premium'),
+    ('C(cow_label, Treatment("Private for-profit"))[T.Federal govt]',     'Federal Govt vs. Private'),
+    ('C(nativity, Treatment("Native-born"))[T.Foreign-born]',             'Foreign-born vs. Native'),
+    ('disabled',                                                          'Disability Wage Penalty'),
+]
+
+rows = []
+for var, label in pairs:
+    if var in model_full.params:
+        c = model_full.params[var]
+        p = model_full.pvalues[var]
+        sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
+        rows.append({'Factor': label,
+                     'Coefficient': round(c, 4),
+                     'Wage Effect (%)': round((np.exp(c)-1)*100, 1),
+                     'p-value': round(p, 4),
+                     'Sig': sig})
+
+result_df = pd.DataFrame(rows)
+print('=== CONDITIONAL WAGE EFFECTS — FULL MODEL ===')
+print(result_df.to_string(index=False))
+print(f'\nModel R² = {model_full.rsquared*100:.1f}% of log-wage variance explained')
+print('\nCONCLUSION: Maryland wage inequality is both structural (occupational sorting)')
+print('and residual (within-job gaps by race, gender, nativity, and disability persist).')
+
+--------------
