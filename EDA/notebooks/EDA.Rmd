@@ -1,1 +1,518 @@
 
+
+## 2. Q1 — Occupational Structure of Maryland
+occ_major = (
+    bls_md[bls_md['O_GROUP'] == 'major']
+    .query('OCC_TITLE != "All Occupations"')
+    .dropna(subset=['TOT_EMP', 'A_MEDIAN'])
+    .sort_values('TOT_EMP', ascending=False)
+)
+occ_major.to_csv('/content/occ_major_for_treemap.csv', index=False)
+print('Saved occ_major_for_treemap.csv')
+
+# Treemap — size = workers, color = median wage
+fig = px.treemap(
+    occ_major,
+    path=['OCC_TITLE'],
+    values='TOT_EMP',
+    color='A_MEDIAN',
+    color_continuous_scale='RdYlGn',
+    title='Maryland Employment by Occupation Group (size = workers, color = median wage)',
+    labels={'A_MEDIAN': 'Annual Median Wage ($)', 'TOT_EMP': 'Total Employed'}
+)
+fig.show()
+
+# Location Quotient bar — Maryland vs US
+bls_md_lq = bls_md[bls_md['O_GROUP'] == 'major'].dropna(subset=['LOC_QUOTIENT'])
+fig2 = px.bar(
+    bls_md_lq.sort_values('LOC_QUOTIENT'),
+    x='LOC_QUOTIENT', y='OCC_TITLE', orientation='h',
+    color='LOC_QUOTIENT', color_continuous_scale='RdYlGn',
+    title='Maryland Occupational Concentration vs. US (Location Quotient > 1 = over-represented)',
+    labels={'LOC_QUOTIENT': 'Location Quotient', 'OCC_TITLE': ''}
+)
+fig2.add_vline(x=1, line_dash='dash', line_color='gray')
+fig2.show()
+
+
+----------
+
+# Weighted median wage per occupation group from PUMS
+occ_wage = (
+    pums2[pums2['WAGP'] > 0]
+    .groupby('OCC_TITLE')
+    .apply(lambda g: pd.Series({
+        'wtd_median': wtd_median(g),
+        'wtd_mean':   np.average(g['WAGP'], weights=g['PWGTP']),
+        'workers':    g['PWGTP'].sum()
+    }))
+    .reset_index()
+    .dropna()
+)
+occ_wage.to_csv('/content/occ_wage_pums.csv', index=False)
+print('Saved occ_wage_pums.csv')
+
+fig3 = px.bar(
+    occ_wage.sort_values('wtd_median'),
+    x='wtd_median', y='OCC_TITLE', orientation='h',
+    color='wtd_median', color_continuous_scale='Viridis',
+    title='Weighted Median Annual Wage by Occupation Group — Maryland (ACS PUMS 2024)',
+    labels={'wtd_median': 'Weighted Median Wage ($)', 'OCC_TITLE': ''}
+)
+fig3.show()
+
+
+---------
+
+
+## 3. Q2 — Gender Wage Gap by Occupation
+
+sex_occ = (
+    pums2[pums2['WAGP'] > 0]
+    .groupby(['OCC_TITLE', 'sex_label'])
+    .apply(wtd_median)
+    .reset_index(name='wtd_median')
+)
+sex_wide = (
+    sex_occ.pivot(index='OCC_TITLE', columns='sex_label', values='wtd_median')
+    .dropna()
+)
+sex_wide['gap'] = sex_wide['Male'] - sex_wide['Female']
+sex_wide = sex_wide.sort_values('gap', ascending=False).reset_index()
+sex_wide.to_csv('/content/sex_wage_gap_by_occupation.csv', index=False)
+print('Saved sex_wage_gap_by_occupation.csv')
+
+# Dumbbell chart
+fig = go.Figure()
+for _, row in sex_wide.iterrows():
+    fig.add_shape(type='line',
+        x0=row['Female'], x1=row['Male'],
+        y0=row['OCC_TITLE'], y1=row['OCC_TITLE'],
+        line=dict(color='lightgray', width=2)
+    )
+fig.add_trace(go.Scatter(
+    x=sex_wide['Male'], y=sex_wide['OCC_TITLE'],
+    mode='markers', name='Male', marker=dict(color='steelblue', size=10)
+))
+fig.add_trace(go.Scatter(
+    x=sex_wide['Female'], y=sex_wide['OCC_TITLE'],
+    mode='markers', name='Female', marker=dict(color='crimson', size=10)
+))
+fig.update_layout(
+    title='Male vs. Female Median Annual Wage by Occupation — Maryland (ACS PUMS 2024)',
+    xaxis_title='Weighted Median Annual Wage ($)',
+    height=600
+)
+fig.show()
+
+print('\nGender gap (Male − Female) by occupation:')
+print(sex_wide[['OCC_TITLE','Male','Female','gap']].to_string(index=False))
+
+
+----------
+
+## 4. Q3 — Education × Occupation Wage Premium
+
+# Heatmap: mean wage by education tier × occupation
+edu_occ = (
+    pums2[pums2['WAGP'] > 0]
+    .groupby(['edu_tier','OCC_TITLE'])
+    .apply(lambda g: np.average(g['WAGP'], weights=g['PWGTP']) if len(g) > 10 else np.nan)
+    .reset_index(name='wtd_mean')
+)
+edu_pivot = (
+    edu_occ.pivot(index='edu_tier', columns='OCC_TITLE', values='wtd_mean')
+    .reindex(edu_order)
+)
+edu_pivot.to_csv('/content/edu_pivot.csv', index=True)
+print('Saved edu_pivot.csv')
+
+fig, ax = plt.subplots(figsize=(18, 6))
+sns.heatmap(edu_pivot / 1000, annot=True, fmt='.0f', cmap='YlOrRd',
+            linewidths=0.5, ax=ax, cbar_kws={'label': 'Mean Wage ($000)'})
+ax.set_title('Mean Annual Wage by Education × Occupation Group — Maryland (ACS PUMS 2024)', fontsize=13)
+ax.set_xlabel('')
+ax.set_ylabel('Education Level')
+plt.xticks(rotation=45, ha='right')
+plt.tight_layout()
+plt.show()
+
+
+---------
+
+
+# Top-paying fields of degree (bachelor's holders)
+fod_map = {
+    2400: 'Computer/Info Systems', 6000: 'Electrical Engineering',
+    6100: 'Computer Engineering / CS', 6200: 'Chemical Engineering',
+    6300: 'Mechanical Engineering',  6400: 'Civil Engineering',
+    7200: 'Medicine/Pharmacy',        7400: 'Law/Legal Studies',
+    5300: 'Finance',                  3600: 'Accounting',
+    5200: 'Business Management',      4100: 'Political Science',
+    5000: 'Biology',                  5500: 'Psychology',
+    7100: 'Nursing',                  7300: 'Public Administration',
+    2300: 'Communications',           4200: 'Sociology',
+    5400: 'Marketing',                2500: 'Education',
+}
+
+ba_df = pums2[(pums2['SCHL'] == 21) & (pums2['WAGP'] > 0)].copy()
+ba_df['fod_name'] = ba_df['FOD1P'].map(fod_map).fillna('Other')
+ba_df.to_csv('/content/ba_df.csv', index=False)
+print('Saved ba_df.csv')
+
+fod_wage = (
+    ba_df.groupby('fod_name')
+    .apply(lambda g: np.average(g['WAGP'], weights=g['PWGTP']) if len(g) > 20 else np.nan)
+    .dropna()
+    .sort_values(ascending=False)
+    .head(20)
+    .reset_index(name='mean_wage')
+)
+fod_wage.to_csv('/content/fod_wage.csv', index=False)
+print('Saved fod_wage.csv')
+
+fig4 = px.bar(
+    fod_wage, x='mean_wage', y='fod_name', orientation='h',
+    title="Top Fields of Degree by Mean Annual Wage (Bachelor's Holders, Maryland)",
+    labels={'mean_wage': 'Weighted Mean Wage ($)', 'fod_name': ''},
+    color='mean_wage', color_continuous_scale='Blues'
+)
+fig4.show()
+
+
+--------------
+
+## 5. Q4 — STEM vs. Non-STEM Wage Premium
+
+stem_df = pums[(pums['WAGP'] > 5000) & (pums['SCIENGP'].notna())].copy()
+stem_df.to_csv('/content/stem_df.csv', index=False)
+print('Saved stem_df.csv')
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+for ax, sex in zip(axes, ['Male', 'Female']):
+    sub = stem_df[stem_df['sex_label'] == sex]
+    non_s = sub[sub['stem'] == 0]['WAGP'].clip(0, 300_000)
+    is_s  = sub[sub['stem'] == 1]['WAGP'].clip(0, 300_000)
+    ax.violinplot([non_s, is_s], positions=[0, 1], showmedians=True)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(['Non-STEM', 'STEM'])
+    ax.set_title(f'{sex} Workers')
+    ax.yaxis.set_major_formatter(mtick.FuncFormatter(lambda x, _: f'${x/1000:.0f}k'))
+    ax.set_ylabel('Annual Wage')
+fig.suptitle('STEM vs. Non-STEM Wage Distribution by Sex — Maryland (ACS PUMS 2024)', fontsize=13)
+plt.tight_layout()
+plt.show()
+
+-----------
+
+
+# STEM premium by race/ethnicity
+stem_df['stem_label'] = stem_df['stem'].map({1: 'STEM Degree', 0: 'Non-STEM Degree'})
+stem_race = (
+    stem_df[stem_df['WAGP'] > 0]
+    .groupby(['race_eth', 'stem_label'])
+    .apply(lambda g: np.average(g['WAGP'], weights=g['PWGTP']))
+    .reset_index(name='mean_wage')
+)
+stem_race.to_csv('/content/stem_race.csv', index=False)
+print('Saved stem_race.csv')
+
+fig5 = px.bar(
+    stem_race, x='race_eth', y='mean_wage', color='stem_label', barmode='group',
+    title='STEM vs. Non-STEM Mean Wage by Race/Ethnicity — Maryland',
+    labels={'mean_wage': 'Weighted Mean Wage ($)', 'race_eth': '', 'stem_label': ''},
+    color_discrete_map={'STEM Degree': 'steelblue', 'Non-STEM Degree': 'salmon'}
+)
+fig5.show()
+
+# Interaction regression
+stem_reg = pums2[['log_wage','stem','sex_label','race_eth','edu_tier','AGEP','PWGTP']].dropna()
+model_stem = smf.wls(
+    'log_wage ~ stem * C(sex_label) + C(race_eth) + C(edu_tier) + AGEP',
+    data=stem_reg, weights=stem_reg['PWGTP']
+).fit(cov_type='HC3')
+print(model_stem.summary().tables[1])
+
+
+----------
+
+
+## 6. Q5 — Class of Worker: Government vs. Private vs. Self-Employed
+
+cow_df = pums[(pums['WAGP'] > 0) & pums['COW'].notna()].copy()
+cow_df.to_csv('/content/cow_df.csv', index=False)
+print('Saved cow_df.csv')
+
+# Mean wage by COW × race
+cow_race = (
+    cow_df.groupby(['cow_label', 'race_eth'])
+    .apply(lambda g: np.average(g['WAGP'], weights=g['PWGTP']))
+    .reset_index(name='mean_wage')
+)
+cow_race.to_csv('/content/cow_race.csv', index=False)
+print('Saved cow_race.csv')
+
+fig6 = px.bar(
+    cow_race, x='cow_label', y='mean_wage', color='race_eth', barmode='group',
+    title='Mean Annual Wage by Class of Worker & Race/Ethnicity — Maryland',
+    labels={'mean_wage': 'Weighted Mean Wage ($)', 'cow_label': '', 'race_eth': 'Race/Ethnicity'},
+    height=500
+)
+fig6.update_layout(xaxis_tickangle=-25)
+fig6.show()
+
+# Racial composition per sector
+cow_comp = cow_df.groupby(['cow_label','race_eth'])['PWGTP'].sum().reset_index()
+cow_comp['share'] = cow_comp.groupby('cow_label')['PWGTP'].transform(lambda x: x / x.sum())
+cow_comp.to_csv('/content/cow_comp.csv', index=False)
+print('Saved cow_comp.csv')
+
+fig7 = px.bar(
+    cow_comp, x='cow_label', y='share', color='race_eth', barmode='stack',
+    title='Racial/Ethnic Composition by Class of Worker — Maryland',
+    labels={'share': 'Share of Workers', 'cow_label': '', 'race_eth': ''}
+)
+fig7.update_layout(xaxis_tickangle=-25)
+fig7.show()
+
+
+------------
+
+## 7. Q6 — Racial Wage Gap & Blinder-Oaxaca Decomposition
+
+# Unconditional gap table
+race_wages = (
+    pums[pums['WAGP'] > 0]
+    .groupby('race_eth')
+    .apply(lambda g: pd.Series({
+        'wtd_mean':   np.average(g['WAGP'], weights=g['PWGTP']),
+        'wtd_median': wtd_median(g),
+        'workers':    g['PWGTP'].sum()
+    }))
+    .reset_index()
+)
+race_wages.to_csv('/content/race_wages.csv', index=False)
+print('Saved race_wages.csv')
+
+white_mean = race_wages.loc[race_wages['race_eth'] == 'White NH', 'wtd_mean'].values[0]
+race_wages['gap_vs_white'] = race_wages['wtd_mean'] - white_mean
+print('Unconditional wage gap by race/ethnicity:')
+print(race_wages.to_string(index=False))
+
+# KDE plot — full-time workers only
+fig, ax = plt.subplots(figsize=(12, 5))
+ft = pums[(pums['WAGP'] > 5000) & (pums['full_time'] == 1)]
+for race, grp in ft.groupby('race_eth'):
+    w = grp['PWGTP'] / grp['PWGTP'].sum()
+    sns.kdeplot(x=grp['WAGP'].clip(0, 250_000), label=race, ax=ax, bw_adjust=0.8)
+ax.set_xlim(0, 250_000)
+ax.xaxis.set_major_formatter(mtick.FuncFormatter(lambda x, _: f'${x/1000:.0f}k'))
+ax.set_title('Wage Distribution by Race/Ethnicity — Maryland Full-Time Workers (ACS PUMS 2024)')
+ax.set_xlabel('Annual Wage')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+---------
+
+
+# Blinder-Oaxaca decomposition: White NH vs Black NH
+white = pums2[(pums2['race_eth'] == 'White NH') & (pums2['log_wage'].notna()) & (pums2['WAGP'] > 0)].copy()
+white.to_csv('/content/white_subdataset.csv', index=False)
+print('Saved white_subdataset.csv')
+black = pums2[(pums2['race_eth'] == 'Black NH')  & (pums2['log_wage'].notna()) & (pums2['WAGP'] > 0)].copy()
+black.to_csv('/content/black_subdataset.csv', index=False)
+print('Saved black_subdataset.csv')
+
+formula = 'log_wage ~ AGEP + full_time + C(edu_tier) + C(soc2)'
+m_w = smf.wls(formula, data=white, weights=white['PWGTP']).fit()
+m_b = smf.wls(formula, data=black, weights=black['PWGTP']).fit()
+
+raw_gap = (
+    np.average(white['log_wage'], weights=white['PWGTP'])
+    - np.average(black['log_wage'],  weights=black['PWGTP'])
+)
+
+X_w, X_b = m_w.model.exog, m_b.model.exog
+k = min(X_w.shape[1], X_b.shape[1])
+X_w, X_b = X_w[:, :k], X_b[:, :k]
+b_w = m_w.params[:k]
+
+# Use model.weights (aligned with model.exog) instead of slicing the raw DataFrame;
+# statsmodels may drop rows during formula expansion, making positional slicing wrong.
+Xbar_w = np.average(X_w, axis=0, weights=m_w.model.weights)
+Xbar_b = np.average(X_b, axis=0, weights=m_b.model.weights)
+
+explained   = np.dot((Xbar_w - Xbar_b), b_w)
+unexplained = raw_gap - explained
+
+print(f'Raw gap (White − Black):  {raw_gap:.4f}  →  {(np.exp(raw_gap)-1)*100:.1f}%')
+print(f'Explained (endowments):   {explained:.4f}  ({explained/raw_gap*100:.1f}% of gap)')
+print(f'Unexplained (residual):   {unexplained:.4f}  ({unexplained/raw_gap*100:.1f}% of gap)')
+
+# Decomposition bar chart
+fig, ax = plt.subplots(figsize=(7, 4))
+bars = ax.barh(
+    ['Explained\n(Education, Occupation, Hours)', 'Unexplained\n(Residual / Discrimination)'],
+    [explained, unexplained],
+    color=['#2196F3', '#F44336']
+)
+ax.axvline(0, color='black', linewidth=0.8)
+ax.set_xlabel('Contribution to Log-Wage Gap')
+ax.set_title('Blinder-Oaxaca Decomposition: White vs. Black Wage Gap — Maryland')
+for bar, val in zip(bars, [explained, unexplained]):
+    ax.text(val + 0.003, bar.get_y() + bar.get_height() / 2,
+            f'{val:.3f} ({val/raw_gap*100:.0f}%)', va='center')
+plt.tight_layout()
+plt.show()
+
+
+
+---------
+
+## 8. Q7 — Nativity & Occupational Sorting
+
+nat_df = pums2[pums2['nativity'].notna() & pums2['WAGP'].notna()]
+nat_df.to_csv('/content/nat_df.csv', index=False)
+print('Saved nat_df.csv')
+
+nat_occ = nat_df.groupby(['nativity','OCC_TITLE'])['PWGTP'].sum().reset_index()
+nat_occ['share'] = nat_occ.groupby('nativity')['PWGTP'].transform(lambda x: x / x.sum())
+nat_occ.to_csv('/content/nat_occ.csv', index=False)
+print('Saved nat_occ.csv')
+
+fig8 = px.bar(
+    nat_occ, x='share', y='OCC_TITLE', color='nativity',
+    orientation='h', barmode='group',
+    title='Occupation Distribution: Native-born vs. Foreign-born — Maryland',
+    labels={'share': 'Share of Workers', 'OCC_TITLE': '', 'nativity': ''}
+)
+fig8.show()
+
+nat_reg = pums2[pums2['WAGP'] > 0].dropna(
+    subset=['log_wage','nativity','edu_tier','AGEP','full_time','soc2']
+)
+model_nat = smf.wls(
+    'log_wage ~ C(nativity, Treatment("Native-born")) + C(edu_tier) + AGEP + full_time + C(soc2)',
+    data=nat_reg, weights=nat_reg['PWGTP']
+).fit(cov_type='HC3')
+
+nat_coef = model_nat.params.get('C(nativity, Treatment("Native-born"))[T.Foreign-born]', np.nan)
+print(f'Foreign-born wage effect (after controls): {nat_coef:.4f}  →  {(np.exp(nat_coef)-1)*100:.1f}%')
+
+----------
+
+
+
+## 9. Q8 & Q9 — Disability, Commute Patterns
+
+# Disability employment rate (working-age adults)
+working_age = pums_raw[(pums_raw['AGEP'] >= 18) & (pums_raw['AGEP'] <= 64)].copy()
+working_age['disabled'] = (working_age['DIS'] == 1).astype(int)
+working_age['employed']  = (working_age['ESR'] == 1).astype(int)
+working_age.to_csv('/content/working_age.csv', index=False)
+print('Saved working_age.csv')
+
+emp_rate = (
+    working_age.groupby('disabled')
+    .apply(lambda g: pd.Series({
+        'employment_rate': np.average(g['employed'], weights=g['PWGTP']),
+        'n_weighted':      g['PWGTP'].sum()
+    }))
+    .reset_index()
+)
+emp_rate['disabled'] = emp_rate['disabled'].map({0: 'No Disability', 1: 'Has Disability'})
+emp_rate.to_csv('/content/emp_rate.csv', index=False)
+print('Saved emp_rate.csv')
+
+print('Employment rate by disability status:')
+print(emp_rate.to_string(index=False))
+
+# Commute time vs wage quartile
+# duplicates='drop' prevents ValueError when wage ties fall on quartile boundaries
+pums['wage_quartile'] = pd.qcut(
+    pums['WAGP'], q=4, labels=['Q1 (Low)','Q2','Q3','Q4 (High)'], duplicates='drop'
+)
+commute_df = pums[pums['JWMNP'].notna() & pums['wage_quartile'].notna()]
+commute_df.to_csv('/content/commute_df.csv', index=False)
+print('Saved commute_df.csv')
+
+fig9 = px.box(
+    commute_df, x='wage_quartile', y='JWMNP',
+    title='Commute Time by Wage Quartile — Maryland Workers',
+    labels={'JWMNP': 'Commute Time (minutes)', 'wage_quartile': 'Wage Quartile'},
+    color='wage_quartile', color_discrete_sequence=px.colors.sequential.Viridis
+)
+fig9.show()
+
+# Commute mode by wage quartile
+mode_q = commute_df.groupby(['wage_quartile','commute_mode'])['PWGTP'].sum().reset_index()
+mode_q['share'] = mode_q.groupby('wage_quartile')['PWGTP'].transform(lambda x: x / x.sum())
+mode_q.to_csv('/content/mode_q.csv', index=False)
+print('Saved mode_q.csv')
+
+fig10 = px.bar(
+    mode_q, x='wage_quartile', y='share', color='commute_mode',
+    title='Commute Mode by Wage Quartile — Maryland',
+    labels={'share': 'Share', 'commute_mode': 'Mode', 'wage_quartile': ''}
+)
+fig10.show()
+
+---------
+
+
+
+## 10. Q10 — Hours Worked & Underemployment
+
+pt_edu = (
+    pums.groupby('edu_tier')
+    .apply(lambda g: np.average(g['part_time'], weights=g['PWGTP']))
+    .reindex(edu_order)
+    .reset_index(name='pt_rate')
+)
+pt_edu.to_csv('/content/pt_edu.csv', index=False)
+print('Saved pt_edu.csv')
+
+pt_race = (
+    pums.groupby('race_eth')
+    .apply(lambda g: np.average(g['part_time'], weights=g['PWGTP']))
+    .reset_index(name='pt_rate')
+)
+pt_race.to_csv('/content/pt_race.csv', index=False)
+print('Saved pt_race.csv')
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+axes[0].barh(pt_edu['edu_tier'], pt_edu['pt_rate'], color='steelblue')
+axes[0].set_xlabel('Part-time Rate')
+axes[0].set_title('Part-time Rate by Education Level')
+axes[0].xaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+
+axes[1].barh(pt_race['race_eth'], pt_race['pt_rate'], color='salmon')
+axes[1].set_xlabel('Part-time Rate')
+axes[1].set_title('Part-time Rate by Race/Ethnicity')
+axes[1].xaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+
+plt.suptitle('Part-time Employment Rate — Maryland Workers (ACS PUMS 2024)', fontsize=13)
+plt.tight_layout()
+plt.show()
+
+# Scatter: annual hours vs wage
+scatter_sample = (
+    pums[(pums['WAGP'] > 0) & (pums['annual_hours'] > 0)]
+    .sample(5000, random_state=42)
+)
+scatter_sample.to_csv('/content/scatter_sample.csv', index=False)
+print('Saved scatter_sample.csv')
+
+fig11 = px.scatter(
+    scatter_sample, x='annual_hours', y='WAGP', color='edu_tier',
+    opacity=0.5, trendline='ols',
+    title='Annual Hours Worked vs. Annual Wages — Maryland (sample n=5,000)',
+    labels={'annual_hours': 'Annual Hours (WKHP × WKWN)', 'WAGP': 'Annual Wage ($)', 'edu_tier': 'Education'}
+)
+fig11.show()
+
+
+
+##
+
